@@ -1,0 +1,14 @@
+[package]
+name = "atrac3p"
+version = "0.1.0"
+authors = ["tarkah <admin@tarkah.dev>"]
+edition = "2018"
+
+[dependencies]
+riff-wave-reader = { path = "../riff/" }
+
+bitstream-io = "0.8"
+thiserror = "1.0"
+lazy_static = "1.4"
+num = "0.2.1"
+rustdct = "0.4"
