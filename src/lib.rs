@@ -61,6 +61,9 @@ impl<R: Read + Seek> Atrac3Plus<R> {
     }
 
     fn next_frame(&mut self) -> Result<(), Error> {
+        self.context.frame_number += 1;
+        println!("{}", self.context.frame_number);
+
         let block_align = self.spec.block_align as f32;
         let data_size = self.spec.data_size;
         let file_size = self.spec.file_size;
@@ -70,61 +73,6 @@ impl<R: Read + Seek> Atrac3Plus<R> {
         });
 
         decode_frame(&mut self.bit_reader, &mut self.context, &mut self.frame)?;
-
-        println!("{}", self.context.frame_number);
-
-        Ok(())
-    }
-
-    pub fn test(&mut self) -> Result<(), Error> {
-        loop {
-            self.next_frame()?;
-            println!("{}", self.context.frame_number);
-        }
-
-        // println!("{}", self.context.ch_units[0].as_ref().unwrap());
-
-        // for (ch_num, channel_samples) in self.context.samples.iter().enumerate() {
-        //     print!("\nCh {}\n", ch_num);
-        //     for sample in channel_samples.iter() {
-        //         print!("{:.21},", sample);
-        //     }
-        // }
-
-        // for (ch_num, channel_samples) in self.context.outp_buf.iter().enumerate() {
-        //     print!("\nCh {}\n", ch_num);
-        //     for sample in channel_samples.iter() {
-        //         print!("{:.21},", sample);
-        //     }
-        // }
-
-        // let mut out = [[0.0; FRAME_SAMPLES]; 2];
-
-        // //decode_residual_spectrum(&mut channel_unit, &mut out, 2)?;
-
-        // let term_maybe = self.bit_reader.read::<u8>(2)?;
-        // let start_flag = self.bit_reader.read::<u8>(1)?;
-        // let unit_type = self.bit_reader.read::<u8>(2)?;
-        // let quant_unit = self.bit_reader.read::<i32>(5)? + 1;
-        // let mute_flag = self.bit_reader.read::<i32>(1)?;
-
-        // println!("{:08b}", term_maybe);
-        // println!("{}", start_flag);
-        // println!("{}", unit_type);
-        // println!("{}", quant_unit);
-        // println!("{}", mute_flag);
-
-        // let mut blocks = 10000;
-        // while blocks > 0 {
-        //     let channel_unit = decode_channel_unit(&mut self.bit_reader)?;
-        //     self.bit_reader.read::<u8>(2)?;
-        //     self.bit_reader.byte_align();
-
-        //     println!("{}", channel_unit);
-
-        //     blocks -= 1;
-        //     dbg!(blocks);
-        // }
 
         Ok(())
     }
@@ -139,7 +87,18 @@ impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
         if remaining_samples == 0 {
             self.frame.channel_to_interleave = 0;
 
-            if let Err(_) = self.next_frame() {
+            if let Err(e) = self.next_frame() {
+                if let Error::IOError(e) = e {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        println!("END OF SONG");
+                    } else {
+                        println!("IO ERROR: {:?}", e.kind());
+                    }
+                    return None;
+                } else {
+                    println!("ERROR: {}", e);
+                }
+
                 self.next()
             } else {
                 self.next()
@@ -472,8 +431,6 @@ fn decode_frame<'a, R: Read + Seek>(
         ch_unit_type = ChannelUnitType::from_bits(bit_reader.read(2)?)?;
         dbg!(ch_unit_type);
     }
-
-    ctx.frame_number += 1;
 
     Ok(())
 }
@@ -2680,12 +2637,19 @@ fn align_to_block<R: Read + Seek>(
     let offset = file_size - data_size;
     pos -= offset;
 
+    dbg!(pos);
+
     let calc_blocks = pos as f32 / block_align;
+    dbg!(calc_blocks);
+
     let next_block = calc_blocks.ceil();
+    dbg!(next_block);
 
     let block_delta = next_block - calc_blocks;
+    dbg!(block_delta);
 
     let bytes_to_align = block_align * block_delta;
+    dbg!(bytes_to_align);
 
     reader.seek(SeekFrom::Current(bytes_to_align.round() as i64))?;
 
