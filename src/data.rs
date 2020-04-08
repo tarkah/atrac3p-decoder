@@ -209,6 +209,33 @@ lazy_static! {
         sine_window(&mut window, 128);
         window
     };
+    pub(crate) static ref SINE_TABLE: [f32; 2048] = {
+        let mut sine_table = [0.0f32; 2048];
+
+        for i in 0..2048 {
+            sine_table[i] = ((std::f32::consts::PI * 2.0) * i as f32 / 2048.0).sin()
+        }
+
+        sine_table
+    };
+    pub(crate) static ref HANN_WINDOW: [f32; 256] = {
+        let mut hann_window = [0.0f32; 256];
+
+        for i in 0..256 {
+            hann_window[i] = (1.0 - ((std::f32::consts::PI * 2.0) * i as f32 / 256.0).cos()) * 0.5;
+        }
+
+        hann_window
+    };
+    pub(crate) static ref AMP_SF_TAB: [f32; 64] = {
+        let mut amp_sf_tab = [0.0f32; 64];
+
+        for i in 0..64 {
+            amp_sf_tab[i] = ((i as f32 - 3.0) / 4.0).exp2()
+        }
+
+        amp_sf_tab
+    };
 }
 
 fn sine_window(window: &mut [f32], n: usize) {

@@ -1,5 +1,8 @@
 use crate::data::*;
-use crate::{ChannelUnit, ChannelUnitType, Context, Error, GCContext, GainInfo, IPQFChannelCtx};
+use crate::{
+    ChannelUnit, ChannelUnitType, Context, Error, GCContext, GainInfo, IPQFChannelCtx,
+    WaveSynthParams, WavesData, WavesEnvelope,
+};
 
 use rustdct::mdct::{window_fn, MDCTNaive, MDCT};
 
@@ -288,9 +291,9 @@ fn imdct(input: &mut [f32], output: &mut [f32], wind_id: u8, sb: usize) -> Resul
         for i in 0..32 {
             _output[i] = 0.0;
         }
-        vector_fmul(&mut _output[32..], &SINE_64[..], 64);
+        vector_fmul(&mut _output[32..], None, &SINE_64[..], 64);
     } else {
-        vector_fmul(&mut _output[..], &SINE_128[..], MDCT_SIZE / 2);
+        vector_fmul(&mut _output[..], None, &SINE_128[..], MDCT_SIZE / 2);
     }
 
     if (wind_id & 1) > 0 {
@@ -380,7 +383,158 @@ fn generate_tones(
     sb: usize,
     output: &mut [f32],
 ) -> Result<(), Error> {
-    unimplemented!();
+    let mut wavreg1 = [0.0f32; 128];
+    let mut wavreg2 = [0.0f32; 128];
+
+    let tones_now: &mut WavesData = &mut ch_unit.channels[ch_num].tones_info_prev[sb];
+    let tones_next: &mut WavesData = &mut ch_unit.channels[ch_num].tones_info[sb];
+
+    if tones_next.pend_env.has_start_point > 0
+        && tones_next.pend_env.start_pos < tones_next.pend_env.stop_pos
+    {
+        tones_next.curr_env.has_start_point = 1;
+        tones_next.curr_env.start_pos = tones_next.pend_env.start_pos + 32;
+    } else if tones_now.pend_env.has_start_point > 0 {
+        tones_next.curr_env.has_start_point = 1;
+        tones_next.curr_env.start_pos = tones_now.pend_env.start_pos;
+    } else {
+        tones_next.curr_env.has_start_point = 0;
+        tones_next.curr_env.start_pos = 0;
+    }
+
+    if tones_now.pend_env.has_stop_point > 0
+        && tones_now.pend_env.stop_pos >= tones_next.curr_env.start_pos
+    {
+        tones_next.curr_env.has_stop_point = 1;
+        tones_next.curr_env.stop_pos = tones_now.pend_env.stop_pos;
+    } else if tones_next.pend_env.has_stop_point > 0 {
+        tones_next.curr_env.has_stop_point = 1;
+        tones_next.curr_env.stop_pos = tones_next.pend_env.stop_pos + 32;
+    } else {
+        tones_next.curr_env.has_stop_point = 0;
+        tones_next.curr_env.stop_pos = 64;
+    }
+
+    let reg1_env_nonzero = if tones_now.curr_env.stop_pos < 32 {
+        0
+    } else {
+        1
+    };
+
+    let reg2_env_nonzero = if tones_next.curr_env.start_pos >= 32 {
+        0
+    } else {
+        1
+    };
+
+    if tones_now.num_wavs > 0 && reg1_env_nonzero > 0 {
+        waves_synth(
+            &ch_unit.waves_info_prev,
+            &tones_now,
+            &tones_now.curr_env,
+            ch_unit.waves_info_prev.invert_phase[sb] & ch_num as u8,
+            128,
+            &mut wavreg1,
+        )?;
+    }
+
+    if tones_next.num_wavs > 0 && reg2_env_nonzero > 0 {
+        waves_synth(
+            &ch_unit.waves_info,
+            &tones_next,
+            &tones_next.curr_env,
+            ch_unit.waves_info.invert_phase[sb] & ch_num as u8,
+            0,
+            &mut wavreg2,
+        )?;
+    }
+
+    if tones_now.num_wavs > 0
+        && tones_next.num_wavs > 0
+        && reg1_env_nonzero > 0
+        && reg2_env_nonzero > 0
+    {
+        vector_fmul(&mut wavreg1, None, &HANN_WINDOW[128..], 128);
+        vector_fmul(&mut wavreg2, None, &HANN_WINDOW[..], 128);
+    } else {
+        if tones_now.num_wavs > 0 && !(tones_now.curr_env.has_stop_point > 0) {
+            vector_fmul(&mut wavreg1, None, &HANN_WINDOW[128..], 128);
+        }
+
+        if tones_next.num_wavs > 0 && !(tones_next.curr_env.has_start_point > 0) {
+            vector_fmul(&mut wavreg2, None, &HANN_WINDOW[..], 128);
+        }
+    }
+
+    for i in 0..128 {
+        output[i] += wavreg1[i] + wavreg2[i];
+    }
+
+    Ok(())
+}
+
+fn waves_synth(
+    synth_param: &WaveSynthParams,
+    waves_info: &WavesData,
+    envelope: &WavesEnvelope,
+    invert_phase: u8,
+    reg_offset: usize,
+    mut output: &mut [f32],
+) -> Result<(), Error> {
+    let wave_param = &synth_param.waves[waves_info.start_index as usize..];
+
+    for wn in 0..waves_info.num_wavs as usize {
+        let amp = AMP_SF_TAB[wave_param[wn].amp_sf as usize] * {
+            if !(synth_param.amplitude_mode > 0) {
+                (wave_param[wn].amp_index as f32 + 1.0) / 15.13
+            } else {
+                1.0
+            }
+        };
+
+        let inc = wave_param[wn].freq_index;
+        let mut pos =
+            ((wave_param[wn].phase_index & 0x1F) << 6) - (reg_offset ^ 128) as i32 * inc & 2047;
+
+        for i in 0..128 {
+            output[i] += SINE_TABLE[pos as usize] * amp;
+            pos = (pos + inc) & 2047;
+        }
+    }
+
+    if invert_phase > 0 {
+        vector_fmul_scalar(&mut output, None, -1.0, 128);
+    }
+
+    if envelope.has_start_point > 0 {
+        let pos = (envelope.start_pos << 2 - reg_offset as i32) as usize;
+        if pos > 0 && pos <= 128 {
+            for i in 0..pos {
+                output[i] = 0.0;
+            }
+            if !(envelope.has_stop_point > 0) || envelope.start_pos != envelope.stop_pos {
+                output[pos + 0] *= HANN_WINDOW[0];
+                output[pos + 1] *= HANN_WINDOW[32];
+                output[pos + 2] *= HANN_WINDOW[64];
+                output[pos + 3] *= HANN_WINDOW[96];
+            }
+        }
+    }
+
+    if envelope.has_stop_point > 0 {
+        let pos = ((envelope.stop_pos + 1 << 2) - reg_offset as i32) as usize;
+        if pos > 0 && pos <= 128 {
+            output[pos - 4] *= HANN_WINDOW[96];
+            output[pos - 3] *= HANN_WINDOW[64];
+            output[pos - 2] *= HANN_WINDOW[32];
+            output[pos - 1] *= HANN_WINDOW[0];
+            for i in 0..(128 - pos) {
+                output[pos + i] = 0.0;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn ipqf(hist: &mut IPQFChannelCtx, input: &[f32], output: &mut [f32]) -> Result<(), Error> {
@@ -440,14 +594,20 @@ fn vector_fmac_scalar(dst: &mut [f32], src: &[f32], mul: f32, len: usize) {
     }
 }
 
-fn vector_fmul(dst: &mut [f32], src1: &[f32], len: usize) {
+fn vector_fmul(dst: &mut [f32], src0: Option<&[f32]>, src1: &[f32], len: usize) {
     for i in 0..len {
-        dst[i] = dst[i] * src1[i];
+        dst[i] = src0.unwrap_or(dst)[i] * src1[i];
     }
 }
 
 fn vector_fmul_reverse(dst: &mut [f32], src1: &[f32], len: usize) {
     for i in 0..len {
         dst[i] = dst[i] * src1[len - 1 - i];
+    }
+}
+
+fn vector_fmul_scalar(dst: &mut [f32], src: Option<&[f32]>, mul: f32, len: usize) {
+    for i in 0..len {
+        dst[i] = src.unwrap_or(dst)[i] * mul;
     }
 }
