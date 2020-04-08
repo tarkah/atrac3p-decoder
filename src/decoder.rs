@@ -199,15 +199,15 @@ pub(crate) fn reconstruct_frame(
             ctx.time_buf[ch][(ch_unit.num_subbands as usize * SUBBAND_SAMPLES) + i] = 0.0;
         }
 
-        println!("Ch {} MDCT", ch);
-        for i in 0..ctx.mdct_buf[ch].len() {
-            print!("{},", ctx.mdct_buf[ch][i]);
-        }
-        println!("\nCh {} Time", ch);
-        for i in 0..ctx.time_buf[ch].len() {
-            print!("{},", ctx.time_buf[ch][i]);
-        }
-        println!();
+        // println!("Ch {} MDCT", ch);
+        // for i in 0..ctx.mdct_buf[ch].len() {
+        //     print!("{},", ctx.mdct_buf[ch][i]);
+        // }
+        // println!("\nCh {} Time", ch);
+        // for i in 0..ctx.time_buf[ch].len() {
+        //     print!("{},", ctx.time_buf[ch][i]);
+        // }
+        // println!();
 
         if ch_unit.waves_info.tones_present > 0 || ch_unit.waves_info_prev.tones_present > 0 {
             for sb in 0..ch_unit.num_subbands as usize {
@@ -328,9 +328,6 @@ fn gain_compensation(
         1.0
     };
 
-    dbg!(gc_scale);
-    dbg!(gc_now.num_points);
-
     if !(gc_now.num_points > 0) {
         for pos in 0..num_samples {
             output[pos] = input[pos] * gc_scale + prev[pos];
@@ -407,12 +404,6 @@ fn ipqf(hist: &mut IPQFChannelCtx, input: &[f32], output: &mut [f32]) -> Result<
             MDCTNaive::<f32>::new(SUBBANDS, |len| (0..len).map(|_| -32.0 / 32768.0).collect());
 
         mdct.process_imdct(&idct_in[..], &mut idct_out[..]);
-
-        println!("post idmct_half output");
-        for i in 8..24 {
-            print!("{:.6},", idct_out[i]);
-        }
-        println!();
 
         let idct_out = &idct_out[8..24];
 

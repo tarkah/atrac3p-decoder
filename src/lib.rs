@@ -62,7 +62,6 @@ impl<R: Read + Seek> Atrac3Plus<R> {
 
     fn next_frame(&mut self) -> Result<(), Error> {
         self.context.frame_number += 1;
-        println!("{}", self.context.frame_number);
 
         let block_align = self.spec.block_align as f32;
         let data_size = self.spec.data_size;
@@ -96,7 +95,7 @@ impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
                     }
                     return None;
                 } else {
-                    println!("ERROR: {}", e);
+                    println!("ERROR frame {}: {}", self.context.frame_number, e);
                 }
 
                 self.next()
@@ -416,8 +415,6 @@ fn decode_frame<'a, R: Read + Seek>(
 
         decode_channel_unit(&mut bit_reader, &mut channel_unit, channels_to_process)?;
 
-        println!("{}", channel_unit);
-
         decode_residual_spectrum(&mut channel_unit, &mut ctx.samples, channels_to_process)?;
 
         reconstruct_frame(&mut ctx, ch_block, channels_to_process)?;
@@ -427,9 +424,7 @@ fn decode_frame<'a, R: Read + Seek>(
         }
 
         ch_block += 1;
-        dbg!(ch_block);
         ch_unit_type = ChannelUnitType::from_bits(bit_reader.read(2)?)?;
-        dbg!(ch_unit_type);
     }
 
     Ok(())
@@ -708,9 +703,6 @@ fn num_coded_units<'a, R: Read + Seek>(
 
     chan.fill_mode = bit_reader.read::<i32>(2)?;
 
-    dbg!(ch_num);
-    dbg!(chan.fill_mode);
-
     if !(chan.fill_mode > 0) {
         chan.num_coded_vals = channel_unit.num_quant_units;
     } else {
@@ -796,8 +788,6 @@ fn decode_channel_sf_idx<'a, R: Read + Seek>(
     let mut weight_index: Option<u8> = None;
 
     let coding_mode = bit_reader.read::<u8>(2)?;
-    dbg!(ch_num);
-    dbg!(coding_mode);
     match coding_mode {
         0 => {
             let mut chan = &mut channel_unit.channels[ch_num];
@@ -1242,9 +1232,6 @@ fn decode_spectrum<'a, R: Read + Seek>(
                     num_specs as usize,
                 )?;
             } else if ch_num > 0 && channel_unit.channels[0].qu_wordlen[qu] > 0 && !(codetab > 0) {
-                dbg!("COPY");
-                dbg!(QU_TO_SPEC_POS[qu]);
-                dbg!(num_specs);
                 {
                     let src_chan = channel_unit.channels[0];
                     let src = &src_chan.spectrum[QU_TO_SPEC_POS[qu] as usize..];
@@ -1619,8 +1606,6 @@ fn decode_gainc_loc_codes<'a, R: Read + Seek>(
     let mut chan = &mut channel_unit.channels[ch_num];
 
     let coding_mode = bit_reader.read::<u8>(2)?;
-    dbg!(ch_num);
-    dbg!(coding_mode);
     match coding_mode {
         0 => {
             for sb in 0..coded_subbands {
@@ -1906,7 +1891,6 @@ fn decode_tones_info<'a, R: Read + Seek>(
 
     channel_unit.waves_info.tones_present = bit_reader.read::<i32>(1)?;
 
-    dbg!(channel_unit.waves_info.tones_present);
     if !(channel_unit.waves_info.tones_present > 0) {
         return Ok(());
     }
@@ -1916,14 +1900,12 @@ fn decode_tones_info<'a, R: Read + Seek>(
     }
 
     channel_unit.waves_info.amplitude_mode = bit_reader.read::<i32>(1)?;
-    dbg!(channel_unit.waves_info.amplitude_mode);
     if !(channel_unit.waves_info.amplitude_mode > 0) {
         return Err(Error::Other("GHA amplitude mode 0"));
     }
 
     let vlc_tab = &TONE_VLC_TABS[0];
     channel_unit.waves_info.num_tone_bands = bit_reader.read_huffman(vlc_tab)? as i32 + 1;
-    dbg!(channel_unit.waves_info.num_tone_bands);
 
     if num_channels == 2 {
         get_subband_flags(
@@ -1943,10 +1925,6 @@ fn decode_tones_info<'a, R: Read + Seek>(
         )?;
     }
 
-    dbg!(channel_unit.waves_info.tone_sharing);
-    dbg!(channel_unit.waves_info.tone_master);
-    dbg!(channel_unit.waves_info.invert_phase);
-
     channel_unit.waves_info.tones_index = 0;
 
     let mut band_has_tones = [0; 16];
@@ -1962,8 +1940,6 @@ fn decode_tones_info<'a, R: Read + Seek>(
                 }
             };
         }
-
-        dbg!(band_has_tones);
 
         decode_tones_envelope(bit_reader, channel_unit, ch_num, &band_has_tones)?;
         decode_band_numwavs(bit_reader, channel_unit, ch_num, &band_has_tones)?;
@@ -2637,19 +2613,11 @@ fn align_to_block<R: Read + Seek>(
     let offset = file_size - data_size;
     pos -= offset;
 
-    dbg!(pos);
-
     let calc_blocks = pos as f32 / block_align;
-    dbg!(calc_blocks);
-
     let next_block = calc_blocks.ceil();
-    dbg!(next_block);
 
     let block_delta = next_block - calc_blocks;
-    dbg!(block_delta);
-
     let bytes_to_align = block_align * block_delta;
-    dbg!(bytes_to_align);
 
     reader.seek(SeekFrom::Current(bytes_to_align.round() as i64))?;
 
