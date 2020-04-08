@@ -9,6 +9,11 @@ pub(crate) fn decode_residual_spectrum(
     num_channels: usize,
 ) -> Result<(), Error> {
     if channel_unit.mute_flag > 0 {
+        unsafe {
+            for ch in 0..num_channels {
+                std::ptr::write_bytes(out[ch].as_mut_ptr(), 0, FRAME_SAMPLES);
+            }
+        }
         return Ok(());
     }
 
@@ -26,6 +31,10 @@ pub(crate) fn decode_residual_spectrum(
     }
 
     for ch in 0..num_channels as usize {
+        unsafe {
+            std::ptr::write_bytes(out[ch].as_mut_ptr(), 0, FRAME_SAMPLES);
+        }
+
         for qu in 0..channel_unit.used_quant_units as usize {
             let nspeclines = QU_TO_SPEC_POS[qu + 1] - QU_TO_SPEC_POS[qu];
 
@@ -190,15 +199,15 @@ pub(crate) fn reconstruct_frame(
             ctx.time_buf[ch][(ch_unit.num_subbands as usize * SUBBAND_SAMPLES) + i] = 0.0;
         }
 
-        // println!("Ch {} MDCT", ch);
-        // for i in 0..ctx.mdct_buf[ch].len() {
-        //     print!("{},", ctx.mdct_buf[ch][i]);
-        // }
-        // println!("\nCh {} Time", ch);
-        // for i in 0..ctx.time_buf[ch].len() {
-        //     print!("{},", ctx.time_buf[ch][i]);
-        // }
-        // println!();
+        println!("Ch {} MDCT", ch);
+        for i in 0..ctx.mdct_buf[ch].len() {
+            print!("{},", ctx.mdct_buf[ch][i]);
+        }
+        println!("\nCh {} Time", ch);
+        for i in 0..ctx.time_buf[ch].len() {
+            print!("{},", ctx.time_buf[ch][i]);
+        }
+        println!();
 
         if ch_unit.waves_info.tones_present > 0 || ch_unit.waves_info_prev.tones_present > 0 {
             for sb in 0..ch_unit.num_subbands as usize {
@@ -295,8 +304,10 @@ fn imdct(input: &mut [f32], output: &mut [f32], wind_id: u8, sb: usize) -> Resul
 
     //println!("{:?}", &_output[..]);
 
-    for i in 0..SUBBAND_SAMPLES {
-        output[i] = _output[i];
+    for i in 0..MDCT_SIZE {
+        if i < output.len() {
+            output[i] = _output[i];
+        }
     }
 
     Ok(())
@@ -317,6 +328,9 @@ fn gain_compensation(
         1.0
     };
 
+    dbg!(gc_scale);
+    dbg!(gc_now.num_points);
+
     if !(gc_now.num_points > 0) {
         for pos in 0..num_samples {
             output[pos] = input[pos] * gc_scale + prev[pos];
@@ -328,13 +342,13 @@ fn gain_compensation(
             let lastpos = gc_now.loc_code[i] << gctx.loc_scale;
 
             let mut lev = gctx.gain_tab1[gc_now.lev_code[i] as usize];
-            let gain_inc = gctx.gain_tab2[(if (i + 1) < gc_now.num_points as usize {
+
+            let gain_inc = gctx.gain_tab2[((if (i + 1) < gc_now.num_points as usize {
                 gc_now.lev_code[i + 1]
             } else {
                 gctx.id2exp_offset
-            }) as usize
-                - gc_now.lev_code[i] as usize
-                + 15];
+            }) - gc_now.lev_code[i]
+                + 15) as usize];
 
             while pos < lastpos as usize {
                 output[pos] = (input[pos] * gc_scale + prev[pos]) * lev;
@@ -390,16 +404,17 @@ fn ipqf(hist: &mut IPQFChannelCtx, input: &[f32], output: &mut [f32]) -> Result<
 
         let mut idct_out: [f32; SUBBANDS * 2] = [0.0; SUBBANDS * 2];
         let mdct =
-            MDCTNaive::<f32>::new(SUBBANDS, |len| (0..len).map(|_| 32.0 / 32768.0).collect());
+            MDCTNaive::<f32>::new(SUBBANDS, |len| (0..len).map(|_| -32.0 / 32768.0).collect());
 
         mdct.process_imdct(&idct_in[..], &mut idct_out[..]);
-        let idct_out = &idct_out[8..24];
 
-        // println!("post idmct_half output");
-        // for i in 8..24 {
-        //     print!("{:.6},", idct_out[i]);
-        // }
-        // println!();
+        println!("post idmct_half output");
+        for i in 8..24 {
+            print!("{:.6},", idct_out[i]);
+        }
+        println!();
+
+        let idct_out = &idct_out[8..24];
 
         for i in 0..8 {
             hist.buf1[hist.pos as usize][i] = idct_out[i + 8];

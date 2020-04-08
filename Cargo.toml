@@ -12,3 +12,14 @@ thiserror = "1.0"
 lazy_static = "1.4"
 num = "0.2.1"
 rustdct = "0.4"
+take_mut = "0.2"
+rodio = { version = "0.11", default-features = false }
+
+[workspace]
+members = [
+    ".",
+    "cli",
+]
+default-members = [
+    "cli",
+]

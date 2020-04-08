@@ -1,7 +1,7 @@
 use bitstream_io::{huffman::ReadHuffmanTree, BigEndian, BitReader};
 use riff_wave_reader::RiffWaveReader;
 
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 mod error;
 pub use error::Error;
@@ -60,12 +60,36 @@ impl<R: Read + Seek> Atrac3Plus<R> {
         })
     }
 
-    pub fn test(&mut self) -> Result<(), Error> {
-        decode_frame(&mut self.bit_reader, &mut self.context, &mut self.frame)?;
+    fn next_frame(&mut self) -> Result<(), Error> {
+        let block_align = self.spec.block_align as f32;
+        let data_size = self.spec.data_size;
+        let file_size = self.spec.file_size;
+
+        take_mut::take(&mut self.bit_reader, |bit_reader| {
+            align_to_block(bit_reader, block_align, data_size, file_size).unwrap()
+        });
 
         decode_frame(&mut self.bit_reader, &mut self.context, &mut self.frame)?;
+
+        println!("{}", self.context.frame_number);
+
+        Ok(())
+    }
+
+    pub fn test(&mut self) -> Result<(), Error> {
+        loop {
+            self.next_frame()?;
+            println!("{}", self.context.frame_number);
+        }
 
         // println!("{}", self.context.ch_units[0].as_ref().unwrap());
+
+        // for (ch_num, channel_samples) in self.context.samples.iter().enumerate() {
+        //     print!("\nCh {}\n", ch_num);
+        //     for sample in channel_samples.iter() {
+        //         print!("{:.21},", sample);
+        //     }
+        // }
 
         // for (ch_num, channel_samples) in self.context.outp_buf.iter().enumerate() {
         //     print!("\nCh {}\n", ch_num);
@@ -106,8 +130,57 @@ impl<R: Read + Seek> Atrac3Plus<R> {
     }
 }
 
+impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let remaining_samples: usize = self.frame.samples.iter().map(|v| v.len()).sum();
+
+        if remaining_samples == 0 {
+            self.frame.channel_to_interleave = 0;
+
+            if let Err(_) = self.next_frame() {
+                self.next()
+            } else {
+                self.next()
+            }
+        } else {
+            let sample = self.frame.samples[self.frame.channel_to_interleave as usize].remove(0);
+
+            self.frame.channel_to_interleave =
+                (self.frame.channel_to_interleave + 1) % self.spec.channels as u8;
+
+            Some(sample)
+        }
+    }
+}
+
+impl<R: Read + Seek> rodio::Source for Atrac3Plus<R> {
+    #[inline]
+    fn current_frame_len(&self) -> Option<usize> {
+        Some(self.frame.samples.iter().map(|v| v.len()).sum())
+    }
+
+    #[inline]
+    fn channels(&self) -> u16 {
+        self.spec.channels
+    }
+
+    #[inline]
+    fn sample_rate(&self) -> u32 {
+        self.spec.sample_rate
+    }
+
+    #[inline]
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Spec {
+    file_size: u32,
+    data_size: u32,
     channels: u16,
     sample_rate: u32,
     block_align: u16,
@@ -127,6 +200,8 @@ fn get_spec_from_riff<R: Read + Seek>(riff_reader: &RiffWaveReader<R>) -> Result
     };
 
     let spec = Spec {
+        file_size: riff_reader.riff_chunk.file_size + 8,
+        data_size: riff_reader.data_chunk.data_size,
         channels: riff_reader.fmt_chunk.num_channels,
         sample_rate: riff_reader.fmt_chunk.sample_rate,
         block_align: riff_reader.fmt_chunk.block_align,
@@ -147,6 +222,7 @@ struct Context {
     num_channels: u8,
     channel_blocks: [Option<ChannelUnitType>; 5],
     gainc_ctx: GCContext,
+    frame_number: u64,
 }
 
 impl Default for Context {
@@ -161,6 +237,7 @@ impl Default for Context {
             num_channels: Default::default(),
             channel_blocks: [None; 5],
             gainc_ctx: Default::default(),
+            frame_number: Default::default(),
         }
     }
 }
@@ -330,12 +407,16 @@ struct IPQFChannelCtx {
 }
 
 struct Frame {
-    samples: Vec<[f32; FRAME_SAMPLES]>,
+    samples: Vec<Vec<f32>>,
+    channel_to_interleave: u8,
 }
 
 impl Frame {
     fn new() -> Frame {
-        Frame { samples: vec![] }
+        Frame {
+            samples: vec![],
+            channel_to_interleave: 0,
+        }
     }
 }
 
@@ -360,38 +441,39 @@ fn decode_frame<'a, R: Read + Seek>(
             return Err(Error::UnsupportedChannelUnitExtension);
         }
 
-        dbg!(ch_unit_type);
-
-        ctx.ch_units[ch_block].as_mut().unwrap().unit_type = ch_unit_type;
+        let mut channel_unit =
+            &mut ctx.ch_units[ch_block]
+                .as_mut()
+                .ok_or(Error::OtherFormat(format!(
+                    "Terminator not reached, tried accessing ch_block: {}",
+                    ch_block
+                )))?;
+        channel_unit.unit_type = ch_unit_type;
         let channels_to_process: usize = match ch_unit_type {
             ChannelUnitType::Mono => 0,
             ChannelUnitType::Stereo => 1,
             _ => 0,
         } + 1;
 
-        decode_channel_unit(
-            &mut bit_reader,
-            &mut ctx.ch_units[ch_block].as_mut().unwrap(),
-            channels_to_process,
-        )?;
+        decode_channel_unit(&mut bit_reader, &mut channel_unit, channels_to_process)?;
 
-        decode_residual_spectrum(
-            &mut ctx.ch_units[ch_block].as_mut().unwrap(),
-            &mut ctx.samples,
-            channels_to_process,
-        )?;
+        println!("{}", channel_unit);
+
+        decode_residual_spectrum(&mut channel_unit, &mut ctx.samples, channels_to_process)?;
 
         reconstruct_frame(&mut ctx, ch_block, channels_to_process)?;
 
         for i in 0..channels_to_process {
-            frame.samples.push(ctx.outp_buf[i]);
+            frame.samples.push(ctx.outp_buf[i].to_vec());
         }
 
         ch_block += 1;
+        dbg!(ch_block);
         ch_unit_type = ChannelUnitType::from_bits(bit_reader.read(2)?)?;
+        dbg!(ch_unit_type);
     }
 
-    bit_reader.byte_align();
+    ctx.frame_number += 1;
 
     Ok(())
 }
@@ -402,8 +484,6 @@ fn decode_channel_unit<'a, R: Read + Seek>(
     num_channels: usize,
 ) -> Result<(), Error> {
     channel_unit.num_quant_units = bit_reader.read::<i32>(5)? + 1;
-
-    dbg!(channel_unit.num_quant_units);
 
     if channel_unit.num_quant_units > 28 && channel_unit.num_quant_units < 32 {
         return Err(Error::OtherFormat(format!(
@@ -464,6 +544,14 @@ fn decode_quant_wordlen<'a, R: Read + Seek>(
     num_channels: usize,
 ) -> Result<(), Error> {
     for ch_num in 0..num_channels {
+        unsafe {
+            std::ptr::write_bytes(
+                channel_unit.channels[ch_num].qu_wordlen.as_mut_ptr(),
+                0,
+                channel_unit.channels[ch_num].qu_wordlen.len(),
+            );
+        }
+
         decode_channel_wordlen(bit_reader, channel_unit, ch_num)?;
     }
 
@@ -729,6 +817,14 @@ fn decode_scale_factors<'a, R: Read + Seek>(
     }
 
     for ch_num in 0..num_channels {
+        unsafe {
+            std::ptr::write_bytes(
+                channel_unit.channels[ch_num].qu_sf_idx.as_mut_ptr(),
+                0,
+                channel_unit.channels[ch_num].qu_sf_idx.len(),
+            );
+        }
+
         decode_channel_sf_idx(bit_reader, channel_unit, ch_num)?;
     }
 
@@ -743,6 +839,8 @@ fn decode_channel_sf_idx<'a, R: Read + Seek>(
     let mut weight_index: Option<u8> = None;
 
     let coding_mode = bit_reader.read::<u8>(2)?;
+    dbg!(ch_num);
+    dbg!(coding_mode);
     match coding_mode {
         0 => {
             let mut chan = &mut channel_unit.channels[ch_num];
@@ -938,6 +1036,14 @@ fn decode_code_table_indexes<'a, R: Read + Seek>(
     channel_unit.use_full_table = bit_reader.read::<i32>(1)?;
 
     for ch_num in 0..num_channels {
+        unsafe {
+            std::ptr::write_bytes(
+                channel_unit.channels[ch_num].qu_tab_idx.as_mut_ptr(),
+                0,
+                channel_unit.channels[ch_num].qu_tab_idx.len(),
+            );
+        }
+
         decode_channel_code_tab(bit_reader, channel_unit, ch_num)?;
     }
 
@@ -1016,6 +1122,10 @@ fn get_subband_flags<'a, R: Read + Seek>(
     out: &mut [u8],
     num_flags: usize,
 ) -> Result<(), Error> {
+    unsafe {
+        std::ptr::write_bytes(out.as_mut_ptr(), 0, num_flags);
+    }
+
     let result = bit_reader.read_bit()?;
     if result {
         if bit_reader.read_bit()? {
@@ -1129,6 +1239,20 @@ fn decode_spectrum<'a, R: Read + Seek>(
     let mut num_specs;
 
     for ch_num in 0..num_channels {
+        {
+            let chan = &mut channel_unit.channels[ch_num];
+
+            unsafe {
+                std::ptr::write_bytes(chan.spectrum.as_mut_ptr(), 0, chan.spectrum.len());
+
+                std::ptr::write_bytes(
+                    chan.power_levs.as_mut_ptr(),
+                    POWER_COMP_OFF,
+                    chan.power_levs.len(),
+                );
+            }
+        }
+
         for qu in 0..channel_unit.used_quant_units as usize {
             num_specs = QU_TO_SPEC_POS[qu + 1] - QU_TO_SPEC_POS[qu];
 
@@ -1160,7 +1284,10 @@ fn decode_spectrum<'a, R: Read + Seek>(
                     out,
                     num_specs as usize,
                 )?;
-            } else if ch_num > 0 && channel_unit.channels[0].qu_wordlen[qu] > 0 && !codetab > 0 {
+            } else if ch_num > 0 && channel_unit.channels[0].qu_wordlen[qu] > 0 && !(codetab > 0) {
+                dbg!("COPY");
+                dbg!(QU_TO_SPEC_POS[qu]);
+                dbg!(num_specs);
                 {
                     let src_chan = channel_unit.channels[0];
                     let src = &src_chan.spectrum[QU_TO_SPEC_POS[qu] as usize..];
@@ -1168,16 +1295,9 @@ fn decode_spectrum<'a, R: Read + Seek>(
                     let chan = &mut channel_unit.channels[ch_num];
                     let dst = &mut chan.spectrum[QU_TO_SPEC_POS[qu] as usize..];
 
-                    unsafe {
-                        std::ptr::copy(
-                            src.as_ptr(),
-                            dst.as_mut_ptr(),
-                            num_specs as usize
-                                * std::mem::size_of_val(
-                                    &chan.spectrum[QU_TO_SPEC_POS[qu] as usize],
-                                ),
-                        )
-                    };
+                    for i in 0..src.len() {
+                        dst[i] = src[i];
+                    }
                 }
 
                 let src_chan = channel_unit.channels[0];
@@ -1267,6 +1387,10 @@ fn decode_gainc_data<'a, R: Read + Seek>(
     num_channels: usize,
 ) -> Result<(), Error> {
     for ch_num in 0..num_channels {
+        for i in 0..channel_unit.channels[ch_num].gain_data.len() {
+            channel_unit.channels[ch_num].gain_data[i] = GainInfo::default();
+        }
+
         if bit_reader.read_bit()? {
             let coded_subbands = bit_reader.read::<i32>(4)? + 1;
 
@@ -1279,6 +1403,15 @@ fn decode_gainc_data<'a, R: Read + Seek>(
             decode_gainc_npoints(bit_reader, channel_unit, ch_num, coded_subbands as usize)?;
             decode_gainc_levels(bit_reader, channel_unit, ch_num, coded_subbands as usize)?;
             decode_gainc_loc_codes(bit_reader, channel_unit, ch_num, coded_subbands as usize)?;
+
+            if coded_subbands > 0 {
+                for sb in coded_subbands..channel_unit.channels[ch_num].num_gain_subbands {
+                    channel_unit.channels[ch_num].gain_data[sb as usize] =
+                        channel_unit.channels[ch_num].gain_data[sb as usize - 1];
+                }
+            }
+        } else {
+            channel_unit.channels[ch_num].num_gain_subbands = 0;
         }
     }
 
@@ -1529,6 +1662,8 @@ fn decode_gainc_loc_codes<'a, R: Read + Seek>(
     let mut chan = &mut channel_unit.channels[ch_num];
 
     let coding_mode = bit_reader.read::<u8>(2)?;
+    dbg!(ch_num);
+    dbg!(coding_mode);
     match coding_mode {
         0 => {
             for sb in 0..coded_subbands {
@@ -1731,11 +1866,11 @@ fn decode_gainc_loc_codes<'a, R: Read + Seek>(
                         let delta = bit_reader.read_huffman(vlc_tab)? as i32;
 
                         if more_than_ref {
-                            chan.gain_data[sb].lev_code[i] =
-                                chan.gain_data[sb].lev_code[i - 1] + delta;
+                            chan.gain_data[sb].loc_code[i] =
+                                chan.gain_data[sb].loc_code[i - 1] + delta;
                         } else {
-                            chan.gain_data[sb].lev_code[i] =
-                                (chan.gain_data[sb - 1].lev_code[i] + delta) & 0x1F;
+                            chan.gain_data[sb].loc_code[i] =
+                                (chan.gain_data[sb - 1].loc_code[i] + delta) & 0x1F;
                         }
                     }
                 }
@@ -1807,12 +1942,8 @@ fn decode_tones_info<'a, R: Read + Seek>(
     num_channels: usize,
 ) -> Result<(), Error> {
     for ch_num in 0..num_channels {
-        unsafe {
-            std::ptr::write_bytes(
-                channel_unit.channels[ch_num].tones_info.as_mut_ptr(),
-                0,
-                channel_unit.channels[ch_num].tones_info.len(),
-            )
+        for i in 0..channel_unit.channels[ch_num].tones_info.len() {
+            channel_unit.channels[ch_num].tones_info[i] = WavesData::default();
         }
     }
 
@@ -1821,6 +1952,10 @@ fn decode_tones_info<'a, R: Read + Seek>(
     dbg!(channel_unit.waves_info.tones_present);
     if !(channel_unit.waves_info.tones_present > 0) {
         return Ok(());
+    }
+
+    for i in 0..channel_unit.waves_info.waves.len() {
+        channel_unit.waves_info.waves[i] = WaveParam::default();
     }
 
     channel_unit.waves_info.amplitude_mode = bit_reader.read::<i32>(1)?;
@@ -1960,7 +2095,72 @@ fn decode_band_numwavs<'a, R: Read + Seek>(
     ch_num: usize,
     band_has_tones: &'a [i32],
 ) -> Result<(), Error> {
-    unimplemented!();
+    let mode = bit_reader.read::<u8>(ch_num as u32 + 1)?;
+    match mode {
+        0 => {
+            let dst = &mut channel_unit.channels[ch_num].tones_info;
+
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if band_has_tones[sb] > 0 {
+                    dst[sb].num_wavs = bit_reader.read::<i32>(4)?;
+                }
+            }
+        }
+        1 => {
+            let dst = &mut channel_unit.channels[ch_num].tones_info;
+
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if band_has_tones[sb] > 0 {
+                    let vlc_tab = &TONE_VLC_TABS[1];
+                    dst[sb].num_wavs = bit_reader.read_huffman(&vlc_tab)? as i32;
+                }
+            }
+        }
+        2 => {
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if band_has_tones[sb] > 0 {
+                    let vlc_tab = &TONE_VLC_TABS[2];
+                    let mut delta = bit_reader.read_huffman(&vlc_tab)? as i32;
+                    delta = sign_extend(delta, 3);
+
+                    let ref_num_wavs = channel_unit.channels[0].tones_info[sb].num_wavs;
+
+                    let dst = &mut channel_unit.channels[ch_num].tones_info;
+                    dst[sb].num_wavs = (ref_num_wavs + delta) & 0xF;
+                }
+            }
+        }
+        3 => {
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if band_has_tones[sb] > 0 {
+                    let ref_num_wavs = channel_unit.channels[0].tones_info[sb].num_wavs;
+
+                    let dst = &mut channel_unit.channels[ch_num].tones_info;
+                    dst[sb].num_wavs = ref_num_wavs;
+                }
+            }
+        }
+        _ => {} // unreachable
+    }
+
+    let dst = &mut channel_unit.channels[ch_num].tones_info;
+
+    for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+        if band_has_tones[sb] > 0 {
+            if channel_unit.waves_info.tones_index + dst[sb].num_wavs > 48 {
+                return Err(Error::OtherFormat(format!(
+                    // ADD NUM FRAMES TO CTX
+                    "Too many tones: {} (max. 48), frame: UNIMPL!",
+                    channel_unit.waves_info.tones_index + dst[sb].num_wavs
+                )));
+            }
+
+            dst[sb].start_index = channel_unit.waves_info.tones_index;
+            channel_unit.waves_info.tones_index += dst[sb].num_wavs;
+        }
+    }
+
+    Ok(())
 }
 
 fn decode_tones_frequency<'a, R: Read + Seek>(
@@ -1969,7 +2169,79 @@ fn decode_tones_frequency<'a, R: Read + Seek>(
     ch_num: usize,
     band_has_tones: &'a [i32],
 ) -> Result<(), Error> {
-    unimplemented!();
+    if !(ch_num > 0) || !bit_reader.read_bit()? {
+        let dst = &mut channel_unit.channels[ch_num].tones_info;
+
+        for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+            if !(band_has_tones[sb] > 0) || !(dst[sb].num_wavs > 0) {
+                continue;
+            }
+
+            let mut iwav = &mut channel_unit.waves_info.waves[dst[sb].start_index as usize..];
+            let direction = if dst[sb].num_wavs > 1 {
+                bit_reader.read::<i32>(1)?
+            } else {
+                0
+            };
+
+            if direction > 0 {
+                if dst[sb].num_wavs > 0 {
+                    iwav[dst[sb].num_wavs as usize - 1].freq_index = bit_reader.read::<i32>(10)?;
+                }
+
+                let mut i = dst[sb].num_wavs - 2;
+                while i >= 0 {
+                    let nbits = log2(iwav[i as usize + 1].freq_index as u32) + 1;
+                    iwav[i as usize].freq_index = bit_reader.read::<i32>(nbits as u32)?;
+                    i -= 1;
+                }
+            } else {
+                for i in 0..dst[sb].num_wavs as usize {
+                    if !(i > 0) || iwav[i - 1].freq_index < 512 {
+                        iwav[i].freq_index = bit_reader.read::<i32>(10)?;
+                    } else {
+                        let nbits = log2(1023 - iwav[i - 1].freq_index as u32) + 1;
+                        iwav[i].freq_index =
+                            bit_reader.read::<i32>(nbits as u32)? + 1024 - (1 << nbits);
+                    }
+                }
+            }
+        }
+    } else {
+        for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+            if !(band_has_tones[sb] > 0)
+                || !(channel_unit.channels[ch_num].tones_info[sb].num_wavs > 0)
+            {
+                continue;
+            }
+
+            for i in 0..channel_unit.channels[ch_num].tones_info[sb].num_wavs as usize {
+                let vlc_tab = &TONE_VLC_TABS[6];
+                let mut delta = bit_reader.read_huffman(vlc_tab)? as i32;
+                delta = sign_extend(delta, 8);
+
+                let iwav = &channel_unit.waves_info.waves
+                    [channel_unit.channels[0].tones_info[sb].start_index as usize..];
+                let ref_num_wavs = channel_unit.channels[0].tones_info[sb].num_wavs;
+
+                let pred = if i < ref_num_wavs as usize {
+                    iwav[i].freq_index
+                } else {
+                    if ref_num_wavs > 0 {
+                        iwav[ref_num_wavs as usize - 1].freq_index
+                    } else {
+                        0
+                    }
+                };
+
+                let owav = &mut channel_unit.waves_info.waves
+                    [channel_unit.channels[ch_num].tones_info[sb].start_index as usize..];
+                owav[i].freq_index = (pred + delta) & 0x3FF;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn decode_tones_amplitude<'a, R: Read + Seek>(
@@ -1978,7 +2250,127 @@ fn decode_tones_amplitude<'a, R: Read + Seek>(
     ch_num: usize,
     band_has_tones: &'a [i32],
 ) -> Result<(), Error> {
-    unimplemented!();
+    let mut refwaves: [i32; 48] = [0; 48];
+
+    if ch_num > 0 {
+        let _ref = &channel_unit.channels[0].tones_info;
+        let dst = &channel_unit.channels[ch_num].tones_info;
+
+        for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+            if !(band_has_tones[sb] > 0) || !(dst[sb].num_wavs > 0) {
+                continue;
+            }
+
+            let wsrc = &channel_unit.waves_info.waves[dst[sb].start_index as usize..];
+            let wref = &channel_unit.waves_info.waves[_ref[sb].start_index as usize..];
+
+            let mut maxdiff = 1024;
+            let mut fi = 0;
+            for j in 0..dst[sb].num_wavs as usize {
+                for i in 0.._ref[sb].num_wavs as usize {
+                    let diff = (wsrc[j].freq_index - wref[i].freq_index).abs();
+                    if diff < maxdiff {
+                        maxdiff = diff;
+                        fi = i as i32;
+                    }
+                }
+
+                if maxdiff < 0 {
+                    refwaves[dst[sb].start_index as usize + j] = fi + _ref[sb].start_index;
+                } else if j < _ref[sb].num_wavs as usize {
+                    refwaves[dst[sb].start_index as usize + j] = j as i32 + _ref[sb].start_index;
+                } else {
+                    refwaves[dst[sb].start_index as usize + j] = -1;
+                }
+            }
+        }
+    }
+
+    let dst = &mut channel_unit.channels[ch_num].tones_info;
+
+    let mode = bit_reader.read::<u8>(ch_num as u32 + 1)?;
+    match mode {
+        0 => {
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if !(band_has_tones[sb] > 0) || !(dst[sb].num_wavs > 0) {
+                    continue;
+                }
+
+                if channel_unit.waves_info.amplitude_mode > 0 {
+                    for i in 0..dst[sb].num_wavs as usize {
+                        channel_unit.waves_info.waves[dst[sb].start_index as usize + i].amp_sf =
+                            bit_reader.read::<i32>(6)?;
+                    }
+                } else {
+                    channel_unit.waves_info.waves[dst[sb].start_index as usize].amp_sf =
+                        bit_reader.read::<i32>(6)?;
+                }
+            }
+        }
+        1 => {
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if !(band_has_tones[sb] > 0) || !(dst[sb].num_wavs > 0) {
+                    continue;
+                }
+
+                if channel_unit.waves_info.amplitude_mode > 0 {
+                    for i in 0..dst[sb].num_wavs as usize {
+                        let vlc_tab = &TONE_VLC_TABS[3];
+                        channel_unit.waves_info.waves[dst[sb].start_index as usize + i].amp_sf =
+                            bit_reader.read_huffman(vlc_tab)? as i32 + 20;
+                    }
+                } else {
+                    let vlc_tab = &TONE_VLC_TABS[4];
+                    channel_unit.waves_info.waves[dst[sb].start_index as usize].amp_sf =
+                        bit_reader.read_huffman(vlc_tab)? as i32 + 24;
+                }
+            }
+        }
+        2 => {
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if !(band_has_tones[sb] > 0) || !(dst[sb].num_wavs > 0) {
+                    continue;
+                }
+
+                for i in 0..dst[sb].num_wavs as usize {
+                    let vlc_tab = &TONE_VLC_TABS[5];
+                    let mut delta = bit_reader.read_huffman(vlc_tab)? as i32;
+                    delta = sign_extend(delta, 5);
+                    let pred = if refwaves[dst[sb].start_index as usize + i] >= 0 {
+                        channel_unit.waves_info.waves
+                            [refwaves[dst[sb].start_index as usize + i] as usize]
+                            .amp_sf
+                    } else {
+                        34
+                    };
+
+                    channel_unit.waves_info.waves[dst[sb].start_index as usize + i].amp_sf =
+                        (pred + delta) & 0x3F;
+                }
+            }
+        }
+        3 => {
+            for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+                if !(band_has_tones[sb] > 0) {
+                    continue;
+                }
+
+                for i in 0..dst[sb].num_wavs as usize {
+                    channel_unit.waves_info.waves[dst[sb].start_index as usize + i].amp_sf =
+                        if refwaves[dst[sb].start_index as usize + i] >= 0 {
+                            channel_unit.waves_info.waves
+                                [refwaves[dst[sb].start_index as usize + i] as usize]
+                                .amp_sf
+                        } else {
+                            32
+                        };
+                }
+            }
+        }
+        _ => {} // unreachable
+    }
+
+    Ok(())
 }
 
 fn decode_tones_phase<'a, R: Read + Seek>(
@@ -1987,7 +2379,20 @@ fn decode_tones_phase<'a, R: Read + Seek>(
     ch_num: usize,
     band_has_tones: &'a [i32],
 ) -> Result<(), Error> {
-    unimplemented!();
+    let dst = &channel_unit.channels[ch_num].tones_info;
+
+    for sb in 0..channel_unit.waves_info.num_tone_bands as usize {
+        if !(band_has_tones[sb] > 0) {
+            continue;
+        }
+
+        let wparam = &mut channel_unit.waves_info.waves[dst[sb].start_index as usize..];
+        for i in 0..dst[sb].num_wavs as usize {
+            wparam[i].phase_index = bit_reader.read::<i32>(5)?;
+        }
+    }
+
+    Ok(())
 }
 
 impl std::fmt::Display for ChannelUnit {
@@ -2260,3 +2665,29 @@ const LOG2_TAB: [u8; 256] = [
     7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
     7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
 ];
+
+fn align_to_block<R: Read + Seek>(
+    mut bit_reader: BitReader<R, BigEndian>,
+    block_align: f32,
+    data_size: u32,
+    file_size: u32,
+) -> Result<BitReader<R, BigEndian>, Error> {
+    bit_reader.byte_align();
+
+    let mut reader = bit_reader.into_reader();
+    let mut pos = reader.seek(SeekFrom::Current(0))? as u32;
+
+    let offset = file_size - data_size;
+    pos -= offset;
+
+    let calc_blocks = pos as f32 / block_align;
+    let next_block = calc_blocks.ceil();
+
+    let block_delta = next_block - calc_blocks;
+
+    let bytes_to_align = block_align * block_delta;
+
+    reader.seek(SeekFrom::Current(bytes_to_align.round() as i64))?;
+
+    Ok(BitReader::new(reader))
+}
