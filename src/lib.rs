@@ -61,8 +61,6 @@ impl<R: Read + Seek> Atrac3Plus<R> {
     }
 
     fn next_frame(&mut self) -> Result<(), Error> {
-        self.context.frame_number += 1;
-
         let block_align = self.spec.block_align as f32;
         let data_size = self.spec.data_size;
         let file_size = self.spec.file_size;
@@ -89,13 +87,18 @@ impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
             if let Err(e) = self.next_frame() {
                 if let Error::IOError(e) = e {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                        println!("END OF SONG");
+                        println!(
+                            "END OF SONG, {} frames processed",
+                            self.context.frame_number
+                        );
                     } else {
                         println!("IO ERROR: {:?}", e.kind());
                     }
                     return None;
                 } else {
+                    println!("{}", self.context.ch_units[0].as_ref().unwrap());
                     println!("ERROR frame {}: {}", self.context.frame_number, e);
+                    panic!();
                 }
 
                 self.next()
@@ -106,7 +109,7 @@ impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
             let sample = self.frame.samples[self.frame.channel_to_interleave as usize].remove(0);
 
             self.frame.channel_to_interleave =
-                (self.frame.channel_to_interleave + 1) % self.spec.channels as u8;
+                (self.frame.channel_to_interleave + 1) % self.frame.samples.len() as u8;
 
             Some(sample)
         }
@@ -383,6 +386,8 @@ fn decode_frame<'a, R: Read + Seek>(
     mut ctx: &'a mut Context,
     frame: &'a mut Frame,
 ) -> Result<(), Error> {
+    ctx.frame_number += 1;
+
     frame.samples.drain(..);
 
     let start_marker = bit_reader.read_bit()?;
@@ -616,7 +621,8 @@ fn decode_channel_wordlen<'a, R: Read + Seek>(
                         chan.qu_wordlen[i] = (chan.qu_wordlen[i] + delta) & 7;
                     }
                 } else {
-                    for i in (0..(chan.num_coded_vals as isize & -2)).step_by(2) {
+                    let mut i = 0usize;
+                    while i < (chan.num_coded_vals as isize & -2) as usize {
                         if !bit_reader.read_bit()? {
                             chan.qu_wordlen[i as usize] = (chan.qu_wordlen[i as usize]
                                 + bit_reader.read_huffman(&vlc_tab)? as i32)
@@ -627,11 +633,13 @@ fn decode_channel_wordlen<'a, R: Read + Seek>(
                                 & 7;
                         }
 
-                        if chan.num_coded_vals & 1 > 0 {
-                            chan.qu_wordlen[i as usize] = (chan.qu_wordlen[i as usize]
-                                + bit_reader.read_huffman(&vlc_tab)? as i32)
-                                & 7;
-                        }
+                        i += 2;
+                    }
+
+                    if chan.num_coded_vals & 1 > 0 {
+                        chan.qu_wordlen[i as usize] = (chan.qu_wordlen[i as usize]
+                            + bit_reader.read_huffman(&vlc_tab)? as i32)
+                            & 7;
                     }
                 }
             }
