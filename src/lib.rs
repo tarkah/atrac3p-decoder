@@ -96,9 +96,9 @@ impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
                     }
                     return None;
                 } else {
-                    println!("{}", self.context.ch_units[0].as_ref().unwrap());
+                    //println!("{}", self.context.ch_units[0].as_ref().unwrap());
                     println!("ERROR frame {}: {}", self.context.frame_number, e);
-                    panic!();
+                    //panic!();
                 }
 
                 self.next()
@@ -386,8 +386,6 @@ fn decode_frame<'a, R: Read + Seek>(
     mut ctx: &'a mut Context,
     frame: &'a mut Frame,
 ) -> Result<(), Error> {
-    ctx.frame_number += 1;
-
     frame.samples.drain(..);
 
     let start_marker = bit_reader.read_bit()?;
@@ -396,6 +394,8 @@ fn decode_frame<'a, R: Read + Seek>(
     if start_marker {
         return Err(Error::InvalidStartBit);
     }
+
+    ctx.frame_number += 1;
 
     let mut ch_block = 0usize;
     let mut ch_unit_type = ChannelUnitType::from_bits(bit_reader.read(2)?)?;
@@ -533,6 +533,8 @@ fn decode_channel_wordlen<'a, R: Read + Seek>(
     ch_num: usize,
 ) -> Result<(), Error> {
     let mut weight_index: Option<u8> = None;
+
+    channel_unit.channels[ch_num].fill_mode = 0;
 
     let coding_mode = bit_reader.read::<u8>(2)?;
     match coding_mode {

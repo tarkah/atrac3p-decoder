@@ -202,22 +202,17 @@ pub(crate) fn reconstruct_frame(
             ctx.time_buf[ch][(ch_unit.num_subbands as usize * SUBBAND_SAMPLES) + i] = 0.0;
         }
 
-        // println!("Ch {} MDCT", ch);
-        // for i in 0..ctx.mdct_buf[ch].len() {
-        //     print!("{},", ctx.mdct_buf[ch][i]);
-        // }
-        // println!("\nCh {} Time", ch);
-        // for i in 0..ctx.time_buf[ch].len() {
-        //     print!("{},", ctx.time_buf[ch][i]);
-        // }
-        // println!();
-
         if ch_unit.waves_info.tones_present > 0 || ch_unit.waves_info_prev.tones_present > 0 {
             for sb in 0..ch_unit.num_subbands as usize {
                 if ch_unit.channels[ch].tones_info[sb].num_wavs > 0
                     || ch_unit.channels[ch].tones_info_prev[sb].num_wavs > 0
                 {
-                    generate_tones(&mut ch_unit, ch, sb, &mut ctx.time_buf[ch][sb * 128..])?;
+                    generate_tones(
+                        &mut ch_unit,
+                        ch,
+                        sb,
+                        &mut ctx.time_buf[ch][sb * SUBBAND_SAMPLES..],
+                    )?;
                 }
             }
         }
@@ -227,6 +222,16 @@ pub(crate) fn reconstruct_frame(
             &ctx.time_buf[ch],
             &mut ctx.outp_buf[ch],
         )?;
+
+        // println!("Ch {} MDCT", ch);
+        // for i in 0..ctx.mdct_buf[ch].len() {
+        //     print!("{},", ctx.mdct_buf[ch][i]);
+        // }
+        // println!("\nCh {} Time", ch);
+        // for i in 0..ctx.time_buf[ch].len() {
+        //     print!("{},", ctx.time_buf[ch][i]);
+        // }
+        // println!();
     }
 
     let mut ch_unit = &mut ctx.ch_units[ch_block].as_mut().unwrap();
