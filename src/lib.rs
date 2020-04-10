@@ -19,15 +19,15 @@ use decoder::*;
 #[allow(clippy::unreadable_literal)]
 const WAV_ATRAC3P_GUID: u128 = 0x62cee401faff19a14471cb58e923aabf;
 
-pub struct Atrac3Plus<R: Read + Seek> {
+pub struct Decoder<R: Read + Seek> {
     bit_reader: BitReader<R, BigEndian>,
     spec: Spec,
     context: Context,
     frame: Frame,
 }
 
-impl<R: Read + Seek> Atrac3Plus<R> {
-    pub fn new(reader: R) -> Result<Atrac3Plus<R>, Error> {
+impl<R: Read + Seek> Decoder<R> {
+    pub fn new(reader: R) -> Result<Decoder<R>, Error> {
         let riff_reader = RiffWaveReader::new(reader)?;
 
         let spec = get_spec_from_riff(&riff_reader)?;
@@ -70,7 +70,7 @@ impl<R: Read + Seek> Atrac3Plus<R> {
 
         let frame = Frame::new();
 
-        Ok(Atrac3Plus {
+        Ok(Decoder {
             bit_reader,
             spec,
             context,
@@ -93,7 +93,7 @@ impl<R: Read + Seek> Atrac3Plus<R> {
     }
 }
 
-impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
+impl<R: Read + Seek> Iterator for Decoder<R> {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -134,7 +134,7 @@ impl<R: Read + Seek> Iterator for Atrac3Plus<R> {
     }
 }
 
-impl<R: Read + Seek> rodio::Source for Atrac3Plus<R> {
+impl<R: Read + Seek> rodio::Source for Decoder<R> {
     #[inline]
     fn current_frame_len(&self) -> Option<usize> {
         Some(self.frame.samples.iter().map(|v| v.len()).sum())

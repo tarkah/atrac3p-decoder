@@ -5,8 +5,6 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use atrac3p::Atrac3Plus;
-
 fn main() -> Result<(), Error> {
     let opts = Opts::from_args();
 
@@ -15,12 +13,12 @@ fn main() -> Result<(), Error> {
             let file = File::open(input)?;
             let reader = BufReader::new(file);
 
-            let atrac = Atrac3Plus::new(reader)?;
+            let decoder = atrac3p_decoder::Decoder::new(reader)?;
 
             let device = rodio::default_output_device().unwrap();
             let sink = rodio::Sink::new(&device);
 
-            sink.append(atrac);
+            sink.append(decoder);
             sink.play();
             sink.sleep_until_end();
         }
@@ -30,7 +28,7 @@ fn main() -> Result<(), Error> {
 }
 
 #[derive(StructOpt)]
-#[structopt(name = "atrac3p-decoder")]
+#[structopt(name = "atrac3p-decoder-cli")]
 struct Opts {
     #[structopt(subcommand)]
     command: Command,

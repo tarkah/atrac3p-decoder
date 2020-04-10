@@ -5,7 +5,7 @@ authors = ["tarkah <admin@tarkah.dev>"]
 edition = "2018"
 
 [dependencies]
-atrac3p = { path = "../" }
+atrac3p-decoder = { path = "../" }
 
 anyhow = "1.0"
 structopt = "0.3"
