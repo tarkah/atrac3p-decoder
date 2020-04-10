@@ -1,12 +1,17 @@
 use anyhow::Error;
+use env_logger::Env;
 use structopt::StructOpt;
 
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Error> {
     let opts = Opts::from_args();
+
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .format(|buf, record| writeln!(buf, "{}", record.args()))
+        .init();
 
     match opts.command {
         Command::Play { input } => {

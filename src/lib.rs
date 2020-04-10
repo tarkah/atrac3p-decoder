@@ -105,17 +105,17 @@ impl<R: Read + Seek> Iterator for Decoder<R> {
             if let Err(e) = self.next_frame() {
                 if let Error::IOError(e) = e {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                        println!(
+                        log::info!(
                             "END OF SONG, {} frames processed",
-                            self.context.frame_number
+                            self.context.frame_number,
                         );
                     } else {
-                        println!("IO ERROR: {:?}", e.kind());
+                        log::error!("IO ERROR: {:?}", e.kind());
                     }
                     return None;
                 } else {
                     //println!("{}", self.context.ch_units[0].as_ref().unwrap());
-                    println!("ERROR frame {}: {}", self.context.frame_number, e);
+                    log::error!("ERROR frame {}: {}", self.context.frame_number, e);
                     //panic!();
                 }
 

@@ -14,7 +14,8 @@ categories = ["multimedia::audio", "multimedia::encoding"]
 [dependencies]
 bitstream-io = "0.8"
 lazy_static = "1.4"
-num = "0.2.1"
+log = "0.4"
+num = "0.2"
 riff-wave-reader = "0.1"
 rodio = { version = "0.11", default-features = false }
 rustdct = "0.4"
