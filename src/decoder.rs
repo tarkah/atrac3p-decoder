@@ -4,7 +4,7 @@ use crate::{
     WaveSynthParams, WavesData, WavesEnvelope,
 };
 
-use rustdct::mdct::{window_fn, MDCTNaive, MDCT};
+use rustdct::mdct::{MDCTViaDCT4, MDCT};
 
 pub(crate) fn decode_residual_spectrum(
     channel_unit: &mut ChannelUnit,
@@ -12,11 +12,12 @@ pub(crate) fn decode_residual_spectrum(
     num_channels: usize,
 ) -> Result<(), Error> {
     if channel_unit.mute_flag > 0 {
-        unsafe {
-            for ch in 0..num_channels {
-                std::ptr::write_bytes(out[ch].as_mut_ptr(), 0, FRAME_SAMPLES);
+        for ch in 0..num_channels {
+            for i in 0..FRAME_SAMPLES {
+                out[ch][i] = 0.0;
             }
         }
+
         return Ok(());
     }
 
@@ -34,8 +35,8 @@ pub(crate) fn decode_residual_spectrum(
     }
 
     for ch in 0..num_channels as usize {
-        unsafe {
-            std::ptr::write_bytes(out[ch].as_mut_ptr(), 0, FRAME_SAMPLES);
+        for i in 0..FRAME_SAMPLES {
+            out[ch][i] = 0.0;
         }
 
         for qu in 0..channel_unit.used_quant_units as usize {
@@ -157,6 +158,7 @@ fn power_compensation(
     Ok(())
 }
 
+#[inline]
 pub(crate) fn reconstruct_frame(
     ctx: &mut Context,
     ch_block: usize,
@@ -176,7 +178,7 @@ pub(crate) fn reconstruct_frame(
                 let input = &mut ctx.samples[ch][sb * SUBBAND_SAMPLES..];
                 let output = &mut ctx.mdct_buf[ch][sb * SUBBAND_SAMPLES..];
 
-                imdct(input, output, wind_id, sb)?;
+                imdct(&ctx.mdct_ctx.as_ref().unwrap(), input, output, wind_id, sb)?;
             }
 
             let ch_unit = &mut ctx.ch_units[ch_block].as_mut().unwrap();
@@ -218,6 +220,7 @@ pub(crate) fn reconstruct_frame(
         }
 
         ipqf(
+            &ctx.ipqf_dct_ctx.as_ref().unwrap(),
             &mut ch_unit.ipqf_ctx[ch],
             &ctx.time_buf[ch],
             &mut ctx.outp_buf[ch],
@@ -273,7 +276,14 @@ pub(crate) fn reconstruct_frame(
     Ok(())
 }
 
-fn imdct(input: &mut [f32], output: &mut [f32], wind_id: u8, sb: usize) -> Result<(), Error> {
+#[inline]
+fn imdct(
+    mdct: &MDCTViaDCT4<f32>,
+    input: &mut [f32],
+    output: &mut [f32],
+    wind_id: u8,
+    sb: usize,
+) -> Result<(), Error> {
     let mut _output: [f32; MDCT_SIZE] = [0.0; MDCT_SIZE];
 
     if (sb & 1) > 0 {
@@ -285,8 +295,6 @@ fn imdct(input: &mut [f32], output: &mut [f32], wind_id: u8, sb: usize) -> Resul
             input[SUBBAND_SAMPLES - 1 - i] = swap0;
         }
     }
-
-    let mdct = MDCTNaive::<f32>::new(SUBBAND_SAMPLES, window_fn::one);
 
     mdct.process_imdct(&input[..SUBBAND_SAMPLES], &mut _output[..]);
 
@@ -321,6 +329,7 @@ fn imdct(input: &mut [f32], output: &mut [f32], wind_id: u8, sb: usize) -> Resul
     Ok(())
 }
 
+#[inline]
 fn gain_compensation(
     gctx: &GCContext,
     input: &[f32],
@@ -382,6 +391,7 @@ fn gain_compensation(
     Ok(())
 }
 
+#[inline]
 fn generate_tones(
     ch_unit: &mut ChannelUnit,
     ch_num: usize,
@@ -478,6 +488,7 @@ fn generate_tones(
     Ok(())
 }
 
+#[inline]
 fn waves_synth(
     synth_param: &WaveSynthParams,
     waves_info: &WavesData,
@@ -542,8 +553,16 @@ fn waves_synth(
     Ok(())
 }
 
-fn ipqf(hist: &mut IPQFChannelCtx, input: &[f32], output: &mut [f32]) -> Result<(), Error> {
-    unsafe { std::ptr::write_bytes(output.as_mut_ptr(), 0, FRAME_SAMPLES) };
+#[inline]
+fn ipqf(
+    mdct: &MDCTViaDCT4<f32>,
+    hist: &mut IPQFChannelCtx,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), Error> {
+    for i in 0..FRAME_SAMPLES {
+        output[i] = 0.0;
+    }
 
     let mut idct_in: [f32; SUBBANDS] = [0.0; SUBBANDS];
 
@@ -559,8 +578,6 @@ fn ipqf(hist: &mut IPQFChannelCtx, input: &[f32], output: &mut [f32]) -> Result<
         // println!();
 
         let mut idct_out: [f32; SUBBANDS * 2] = [0.0; SUBBANDS * 2];
-        let mdct =
-            MDCTNaive::<f32>::new(SUBBANDS, |len| (0..len).map(|_| -32.0 / 32768.0).collect());
 
         mdct.process_imdct(&idct_in[..], &mut idct_out[..]);
 
@@ -593,24 +610,28 @@ fn ipqf(hist: &mut IPQFChannelCtx, input: &[f32], output: &mut [f32]) -> Result<
     Ok(())
 }
 
+#[inline]
 fn vector_fmac_scalar(dst: &mut [f32], src: &[f32], mul: f32, len: usize) {
     for i in 0..len {
         dst[i] += src[i] * mul;
     }
 }
 
+#[inline]
 fn vector_fmul(dst: &mut [f32], src0: Option<&[f32]>, src1: &[f32], len: usize) {
     for i in 0..len {
         dst[i] = src0.unwrap_or(dst)[i] * src1[i];
     }
 }
 
+#[inline]
 fn vector_fmul_reverse(dst: &mut [f32], src1: &[f32], len: usize) {
     for i in 0..len {
         dst[i] = dst[i] * src1[len - 1 - i];
     }
 }
 
+#[inline]
 fn vector_fmul_scalar(dst: &mut [f32], src: Option<&[f32]>, mul: f32, len: usize) {
     for i in 0..len {
         dst[i] = src.unwrap_or(dst)[i] * mul;

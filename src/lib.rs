@@ -1,5 +1,9 @@
 use bitstream_io::{huffman::ReadHuffmanTree, BigEndian, BitReader};
 use riff_wave_reader::RiffWaveReader;
+use rustdct::{
+    mdct::{window_fn, MDCTViaDCT4},
+    DCTplanner,
+};
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -34,9 +38,23 @@ impl<R: Read + Seek> Atrac3Plus<R> {
 
         let bit_reader = BitReader::new(riff_reader.into_reader());
 
+        init_static();
+
         let mut context = Context::default();
 
         context.gainc_ctx = GCContext::init(6, 2);
+
+        let mut planner = DCTplanner::new();
+        let inner_dct4 = planner.plan_dct4(SUBBAND_SAMPLES);
+        let mdct_ctx = MDCTViaDCT4::<f32>::new(inner_dct4, window_fn::one);
+        context.mdct_ctx = Some(mdct_ctx);
+
+        let mut planner = DCTplanner::new();
+        let inner_dct4 = planner.plan_dct4(SUBBANDS);
+        let ipqf_dct_ctx = MDCTViaDCT4::<f32>::new(inner_dct4, |len| {
+            (0..len).map(|_| -32.0 / 32768.0).collect()
+        });
+        context.ipqf_dct_ctx = Some(ipqf_dct_ctx);
 
         set_channel_params(&mut context, &spec)?;
 
@@ -134,7 +152,8 @@ impl<R: Read + Seek> rodio::Source for Atrac3Plus<R> {
 
     #[inline]
     fn total_duration(&self) -> Option<std::time::Duration> {
-        None
+        let millis = (1000 * self.spec.data_size as u64 * 8) / (self.spec.byte_rate as u64 * 8);
+        Some(std::time::Duration::from_millis(millis))
     }
 }
 
@@ -147,6 +166,7 @@ struct Spec {
     block_align: u16,
     bits_per_coded_sample: u16,
     channel_mask: u32,
+    byte_rate: u32,
 }
 
 fn get_spec_from_riff<R: Read + Seek>(riff_reader: &RiffWaveReader<R>) -> Result<Spec, Error> {
@@ -168,10 +188,13 @@ fn get_spec_from_riff<R: Read + Seek>(riff_reader: &RiffWaveReader<R>) -> Result
         block_align: riff_reader.fmt_chunk.block_align,
         bits_per_coded_sample: extended_info.bits_per_coded_sample,
         channel_mask: extended_info.channel_mask,
+        byte_rate: riff_reader.fmt_chunk.byte_rate,
     };
 
     Ok(spec)
 }
+
+unsafe impl Send for Context {}
 
 struct Context {
     samples: [[f32; FRAME_SAMPLES]; 2],
@@ -184,6 +207,8 @@ struct Context {
     channel_blocks: [Option<ChannelUnitType>; 5],
     gainc_ctx: GCContext,
     frame_number: u64,
+    mdct_ctx: Option<MDCTViaDCT4<f32>>,
+    ipqf_dct_ctx: Option<MDCTViaDCT4<f32>>,
 }
 
 impl Default for Context {
@@ -199,6 +224,8 @@ impl Default for Context {
             channel_blocks: [None; 5],
             gainc_ctx: Default::default(),
             frame_number: Default::default(),
+            mdct_ctx: None,
+            ipqf_dct_ctx: None,
         }
     }
 }
@@ -501,12 +528,8 @@ fn decode_quant_wordlen<'a, R: Read + Seek>(
     num_channels: usize,
 ) -> Result<(), Error> {
     for ch_num in 0..num_channels {
-        unsafe {
-            std::ptr::write_bytes(
-                channel_unit.channels[ch_num].qu_wordlen.as_mut_ptr(),
-                0,
-                channel_unit.channels[ch_num].qu_wordlen.len(),
-            );
+        for i in 0..channel_unit.channels[ch_num].qu_wordlen.len() {
+            channel_unit.channels[ch_num].qu_wordlen[i] = 0;
         }
 
         decode_channel_wordlen(bit_reader, channel_unit, ch_num)?;
@@ -776,12 +799,8 @@ fn decode_scale_factors<'a, R: Read + Seek>(
     }
 
     for ch_num in 0..num_channels {
-        unsafe {
-            std::ptr::write_bytes(
-                channel_unit.channels[ch_num].qu_sf_idx.as_mut_ptr(),
-                0,
-                channel_unit.channels[ch_num].qu_sf_idx.len(),
-            );
+        for i in 0..channel_unit.channels[ch_num].qu_sf_idx.len() {
+            channel_unit.channels[ch_num].qu_sf_idx[i] = 0;
         }
 
         decode_channel_sf_idx(bit_reader, channel_unit, ch_num)?;
@@ -993,12 +1012,8 @@ fn decode_code_table_indexes<'a, R: Read + Seek>(
     channel_unit.use_full_table = bit_reader.read::<i32>(1)?;
 
     for ch_num in 0..num_channels {
-        unsafe {
-            std::ptr::write_bytes(
-                channel_unit.channels[ch_num].qu_tab_idx.as_mut_ptr(),
-                0,
-                channel_unit.channels[ch_num].qu_tab_idx.len(),
-            );
+        for i in 0..channel_unit.channels[ch_num].qu_tab_idx.len() {
+            channel_unit.channels[ch_num].qu_tab_idx[i] = 0;
         }
 
         decode_channel_code_tab(bit_reader, channel_unit, ch_num)?;
@@ -1079,8 +1094,8 @@ fn get_subband_flags<'a, R: Read + Seek>(
     out: &mut [u8],
     num_flags: usize,
 ) -> Result<(), Error> {
-    unsafe {
-        std::ptr::write_bytes(out.as_mut_ptr(), 0, num_flags);
+    for i in 0..num_flags {
+        out[i] = 0;
     }
 
     let result = bit_reader.read_bit()?;
@@ -1199,14 +1214,12 @@ fn decode_spectrum<'a, R: Read + Seek>(
         {
             let chan = &mut channel_unit.channels[ch_num];
 
-            unsafe {
-                std::ptr::write_bytes(chan.spectrum.as_mut_ptr(), 0, chan.spectrum.len());
+            for i in 0..chan.spectrum.len() {
+                chan.spectrum[i] = 0;
+            }
 
-                std::ptr::write_bytes(
-                    chan.power_levs.as_mut_ptr(),
-                    POWER_COMP_OFF,
-                    chan.power_levs.len(),
-                );
+            for i in 0..chan.power_levs.len() {
+                chan.power_levs[i] = POWER_COMP_OFF;
             }
         }
 
@@ -1421,7 +1434,7 @@ fn decode_gainc_npoints<'a, R: Read + Seek>(
                 }
             } else {
                 let delta_bits = bit_reader.read::<u32>(2)?;
-                let min_val = bit_reader.read::<i32>(2)?;
+                let min_val = bit_reader.read::<i32>(3)?;
 
                 for i in 0..coded_subbands {
                     chan.gain_data[i].num_points = min_val + bit_reader.read::<i32>(delta_bits)?;
@@ -2626,4 +2639,19 @@ fn align_to_block<R: Read + Seek>(
     reader.seek(SeekFrom::Current(bytes_to_align.round() as i64))?;
 
     Ok(BitReader::new(reader))
+}
+
+fn init_static() {
+    lazy_static::initialize(&WL_VLC_TABS);
+    lazy_static::initialize(&SF_VLC_TABS);
+    lazy_static::initialize(&CT_VLC_TABS);
+    lazy_static::initialize(&GAIN_VLC_TABS);
+    lazy_static::initialize(&TONE_VLC_TABS);
+    lazy_static::initialize(&SINE_64);
+    lazy_static::initialize(&SINE_128);
+    lazy_static::initialize(&SINE_TABLE);
+    lazy_static::initialize(&HANN_WINDOW);
+    lazy_static::initialize(&AMP_SF_TAB);
+    lazy_static::initialize(&SPECTRA_TABS);
+    lazy_static::initialize(&SPEC_VLC_TABS);
 }
