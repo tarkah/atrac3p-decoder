@@ -1,3 +1,12 @@
+// Atrac3+ Decoder
+//
+// Copyright (c) 2020 Cory Forsstrom <cforsstrom18@gmail.com>
+// Copyright (c) 2010-2013 Maxim Poliakovski
+//
+// The following code is a derivative work of the code from the FFmpeg project,
+// which is licensed LGPL v2.1. This code therefore is also licensed under the terms
+// of the GNU Lesser General Public License, verison 2.1.
+
 use std::io;
 use thiserror::Error;
 
